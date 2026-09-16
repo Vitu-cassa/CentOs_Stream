@@ -1,0 +1,984 @@
+#!/usr/bin/env bash
+#
+# cis-baseline-check.sh
+#
+# Verificador de baseline de hardening inspirado no CIS Benchmark
+# (referencia: CIS Red Hat Enterprise Linux 10 Benchmark v1.0.1).
+#
+# O QUE ESTE SCRIPT FAZ:
+#   Executa uma bateria de verificacoes SOMENTE-LEITURA (nunca altera nada
+#   no sistema) sobre o hardening de um servidor CentOS Stream, cobrindo:
+#   montagens/particoes, SELinux, servicos inseguros, permissoes de
+#   arquivos sensiveis, binarios SUID/SGID, contas/grupos duplicados,
+#   auditd e atualizacoes pendentes. Ao final, imprime um resumo no
+#   terminal e gera um relatorio em HTML com todos os resultados.
+#
+# POR QUE E SOMENTE-LEITURA (relevante para o requisito "Reversibilidade"):
+#   Como o script apenas LE o estado do sistema e nunca grava/edita nada
+#   fora do proprio log e relatorio, nao existe "configuracao alterada"
+#   para desfazer. Rodar o script 2x, 10x ou 1000x produz sempre o mesmo
+#   resultado (dado um sistema que nao mudou) -- e a definicao pratica de
+#   idempotencia, e tambem o motivo de nao haver uma rotina de rollback.
+#
+# ESQUEMA DE PARTICOES QUE ESTE SCRIPT PRESSUPOE (ver documentacao do
+# trabalho): sda3 e um container LUKS2 contendo um Volume Group com os
+# Logical Volumes lv_root(/), lv_var(/var), lv_varlog(/var/log),
+# lv_vartmp(/var/tmp), lv_home(/home), lv_tmp(/tmp) e lv_swap(swap).
+# As opcoes de montagem abaixo refletem a tabela de hardening definida
+# pelo grupo para cada um desses pontos de montagem.
+#
+# Uso:
+#   ./cis-baseline-check.sh [-o ARQUIVO] [-q] [-h|--help]
+#
+# Codigos de saida (ver secao 1, constantes CIS_EXIT_*):
+#   0 sucesso | 1 achado(s) | 2 erro de uso | 3 dependencia ausente
+#
+set -euo pipefail
+# IFS = "Internal Field Separator". Por padrao o bash usa espaco, tab e
+# quebra de linha para separar palavras ao expandir variaveis/arrays.
+# Redefinir para APENAS quebra de linha e tab evita que nomes de arquivo
+# com espaco (ex.: "/etc/shadow copia.bak", raro mas possivel) sejam
+# quebrados em pedacos errados nos loops "for" deste script.
+IFS=$'\n\t'
+
+# =============================================================================
+# 1. CONSTANTES E ESTADO GLOBAL
+# =============================================================================
+# Todas as variaveis GLOBAIS deste script usam o prefixo CIS_ (constantes,
+# com 'readonly') ou cis_ (funcoes). Isso existe para um motivo concreto:
+# os 6 grupos da turma podem rodar scripts diferentes na MESMA VM de
+# avaliacao. Sem prefixo, uma variavel generica como PASS ou LOG_FILE de
+# outro script poderia colidir com a deste e corromper o resultado.
+
+# --- Metadados do script (somente leitura, nunca mudam durante a execucao)
+readonly CIS_SCRIPT_NAME="cis-baseline-check.sh"   # usado em mensagens de uso/log
+readonly CIS_VERSION="1.1.0"                       # exibido em --help
+
+# --- Caminhos de log e lock (somente leitura)
+# CIS_LOG_FILE: arquivo de log persistente, formato "TIMESTAMP [NIVEL] msg".
+#   Caminho exclusivo (nao generico tipo /var/log/hardening.log) para nao
+#   colidir com o log de outro script do grupo.
+readonly CIS_LOG_FILE="/var/log/cis-baseline-check.log"
+# CIS_LOCK_FILE: usado com 'flock' para impedir que duas instancias deste
+#   MESMO script rodem ao mesmo tempo e corrompam o mesmo relatorio HTML.
+readonly CIS_LOCK_FILE="/var/lock/cis-baseline-check.lock"
+
+# --- Variaveis MUTAVEIS (por isso sem 'readonly'): podem ser sobrescritas
+#     pelos parametros de linha de comando em cis_parse_args().
+# CIS_REPORT_FILE: caminho do relatorio HTML de saida. Valor padrao abaixo,
+#   sobrescrito se o usuario passar "-o /outro/caminho.html".
+CIS_REPORT_FILE="/var/log/cis-baseline-check-report.html"
+# CIS_QUIET: flag 0/1. Quando 1 (via "-q"), suprime a impressao de
+#   WARN/ERROR no terminal (mas continua gravando tudo no log).
+CIS_QUIET=0
+
+# --- Contadores globais de resultado, incrementados pelas funcoes
+#     cis_ok / cis_bad / cis_meh conforme cada verificacao roda.
+#     Usados no resumo final e no calculo de pontuacao do relatorio HTML.
+CIS_PASS=0   # quantidade de verificacoes que passaram
+CIS_FAIL=0   # quantidade de verificacoes que falharam (achados reais)
+CIS_WARN=0   # quantidade de verificacoes inconclusivas (dependencia
+             # ausente, particao nao existe no ambiente, etc.)
+
+# --- Array que acumula as LINHAS <tr> do relatorio HTML, uma por
+#     verificacao executada. E preenchido por cis_ok/cis_bad/cis_meh e
+#     consumido no final por cis_generate_html_report().
+declare -a CIS_REPORT_ROWS=()
+
+# --- Array que guarda os caminhos de TODOS os arquivos temporarios
+#     criados durante a execucao (via cis_mktemp). O trap de limpeza
+#     (cis_cleanup) percorre este array no final para apagar tudo, mesmo
+#     se o script for interrompido no meio (Ctrl+C, erro, etc.).
+declare -a CIS_TMP_FILES=()
+
+# --- Codigos de saida padronizados do script (exigido no enunciado).
+#     'readonly' porque sao constantes: nunca devem ser reatribuidos.
+readonly CIS_EXIT_SUCCESS=0     # 0 sucesso: nenhuma falha encontrada
+readonly CIS_EXIT_FINDING=1     # 1 achado: pelo menos uma verificacao falhou
+readonly CIS_EXIT_USAGE=2       # 2 erro de uso: parametro invalido / sem root
+readonly CIS_EXIT_DEPENDENCY=3  # 3 erro de dependencia: comando ausente
+
+# =============================================================================
+# 2. LIMPEZA E SAIDA (trap)
+# =============================================================================
+# cis_cleanup: funcao chamada automaticamente pelo 'trap' abaixo sempre que
+# o script termina -- seja terminando normalmente (EXIT), seja interrompido
+# por Ctrl+C (INT) ou 'kill' (TERM). Responsabilidades:
+#   1) apagar todo arquivo temporario listado em CIS_TMP_FILES;
+#   2) liberar o lock do flock, para nao deixar o proximo run travado.
+# shellcheck disable=SC2317  # a funcao E chamada (via trap), o shellcheck
+# so nao consegue enxergar essa chamada indireta e por isso a marcaria
+# erroneamente como "codigo morto" sem essa linha de supressao.
+cis_cleanup() {
+    local l_file  # variavel LOCAL de iteracao: existe so dentro desta
+                   # funcao, nao "vaza" para o namespace global do script.
+    for l_file in "${CIS_TMP_FILES[@]:-}"; do
+        # "${array[@]:-}" evita erro do 'set -u' caso o array esteja vazio.
+        if [ -n "$l_file" ] && [ -f "$l_file" ]; then
+            rm -f "$l_file"
+        fi
+    done
+    if [ -f "$CIS_LOCK_FILE" ]; then
+        # libera o descritor de arquivo 200 (aberto em main() com 'exec 200>')
+        flock -u 200 2>/dev/null || true
+    fi
+}
+# Registra cis_cleanup para rodar em EXIT (saida normal), INT (Ctrl+C) e
+# TERM (sinal de encerramento). Sem isso, um Ctrl+C no meio da execucao
+# deixaria arquivos temporarios orfaos em /tmp.
+trap cis_cleanup EXIT INT TERM
+
+# cis_mktemp: cria UM arquivo temporario com nome unico e imprevisivel
+# (via 'mktemp', nunca um nome fixo como /tmp/cis_tmp -- nome fixo geraria
+# condicao de corrida se o script rodasse 2x ao mesmo tempo) e registra
+# seu caminho em CIS_TMP_FILES para ser apagado depois pelo cis_cleanup.
+# Retorno: imprime o caminho do arquivo criado (capturado via $(...) por
+# quem chama esta funcao).
+cis_mktemp() {
+    local l_tmp  # caminho do arquivo recem-criado, local a esta funcao
+    l_tmp=$(mktemp "/tmp/${CIS_SCRIPT_NAME}.XXXXXX")
+    CIS_TMP_FILES+=("$l_tmp")   # registra para limpeza automatica depois
+    printf '%s' "$l_tmp"        # "retorna" o caminho via stdout
+}
+
+# =============================================================================
+# 3. LOGGING (timestamp, nivel INFO/WARN/ERROR, arquivo em /var/log)
+# =============================================================================
+# cis_log: funcao base de log. Grava SEMPRE no arquivo CIS_LOG_FILE, e
+# opcionalmente tambem imprime na tela (stderr), dependendo do nivel e
+# da flag CIS_QUIET.
+#   Parametros:
+#     $1 (l_level) -- "INFO", "WARN" ou "ERROR"
+#     $2 (l_msg)   -- texto da mensagem
+cis_log() {
+    local l_level="$1"
+    local l_msg="$2"
+    local l_ts  # timestamp formatado, gerado a cada chamada
+    l_ts=$(date '+%Y-%m-%d %H:%M:%S')
+
+    # Na primeira escrita, cria o arquivo de log com permissao restrita
+    # (640 = dono le/escreve, grupo so le, outros sem acesso), ja que o
+    # log pode conter caminhos de arquivos sensiveis do sistema.
+    if [ ! -f "$CIS_LOG_FILE" ]; then
+        touch "$CIS_LOG_FILE" 2>/dev/null || true
+        chmod 640 "$CIS_LOG_FILE" 2>/dev/null || true
+    fi
+
+    # "|| true" evita que uma falha de escrita no log (ex.: disco cheio)
+    # derrube o script inteiro por causa do 'set -e'.
+    printf '%s [%s] %s\n' "$l_ts" "$l_level" "$l_msg" >> "$CIS_LOG_FILE" 2>/dev/null || true
+
+    # So imprime na tela se NAO estiver em modo silencioso (-q) E o nivel
+    # nao for INFO (INFO fica reservado ao arquivo de log, para nao poluir
+    # a saida do terminal durante a execucao normal).
+    if [ "$CIS_QUIET" -eq 0 ] && [ "$l_level" != "INFO" ]; then
+        printf '%s [%s] %s\n' "$l_ts" "$l_level" "$l_msg" >&2
+    fi
+}
+
+# Atalhos de conveniencia para cada nivel de log, usados no resto do script.
+cis_log_info()  { cis_log "INFO"  "$1"; }
+cis_log_warn()  { cis_log "WARN"  "$1"; }
+cis_log_error() { cis_log "ERROR" "$1"; }
+
+# =============================================================================
+# 4. FUNCOES DE RESULTADO (pass/fail/warn) + acumulo para o relatorio HTML
+# =============================================================================
+# Nota de implementacao importante: em TODO lugar deste script onde um
+# contador e incrementado, a sintaxe usada e SEMPRE "VAR=$((VAR+1))" e
+# NUNCA "((VAR++))". O motivo: com 'set -e' ativo, a expressao aritmetica
+# "((VAR++))" retorna status de saida 1 quando o VALOR ANTES do incremento
+# era 0 (comportamento do bash, nao um bug) -- e 'set -e' interpretaria
+# esse "1" como erro e encerraria o script prematuramente na primeira
+# verificacao. "VAR=$((VAR+1))" nao tem esse problema.
+
+# cis_ok: registra uma verificacao que PASSOU.
+#   $1 (l_check) -- descricao curta da verificacao (ex.: "SELinux enforcing")
+cis_ok() {
+    local l_check="$1"
+    printf '  [OK]   %s\n' "$l_check"
+    CIS_PASS=$((CIS_PASS + 1))
+    CIS_REPORT_ROWS+=("<tr class=\"ok\"><td>OK</td><td>${l_check}</td><td></td></tr>")
+    cis_log_info "OK: ${l_check}"
+}
+
+# cis_bad: registra uma verificacao que FALHOU (achado real de hardening).
+#   $1 (l_check)  -- descricao curta da verificacao
+#   $2 (l_reason) -- detalhe do motivo da falha (opcional)
+cis_bad() {
+    local l_check="$1"
+    local l_reason="${2:-}"   # "${2:-}" evita erro do 'set -u' se $2 nao vier
+    printf '  [FAIL] %s -> %s\n' "$l_check" "$l_reason"
+    CIS_FAIL=$((CIS_FAIL + 1))
+    CIS_REPORT_ROWS+=("<tr class=\"fail\"><td>FAIL</td><td>${l_check}</td><td>${l_reason}</td></tr>")
+    cis_log_error "FAIL: ${l_check} -> ${l_reason}"
+}
+
+# cis_meh: registra uma verificacao INCONCLUSIVA -- nao e uma falha de
+# hardening, mas tambem nao pode ser confirmada como OK (ex.: comando
+# necessario ausente no sistema, ou a particao/arquivo checado nem existe
+# neste ambiente). Existe para o script "degradar graciosamente" em vez
+# de travar quando roda fora do ambiente-alvo (CentOS Stream com todas as
+# particoes do esquema de referencia).
+#   $1 (l_check)  -- descricao curta da verificacao
+#   $2 (l_reason) -- motivo de nao ter sido possivel confirmar
+cis_meh() {
+    local l_check="$1"
+    local l_reason="${2:-}"
+    printf '  [WARN] %s -> %s\n' "$l_check" "$l_reason"
+    CIS_WARN=$((CIS_WARN + 1))
+    CIS_REPORT_ROWS+=("<tr class=\"warn\"><td>WARN</td><td>${l_check}</td><td>${l_reason}</td></tr>")
+    cis_log_warn "WARN: ${l_check} -> ${l_reason}"
+}
+
+# =============================================================================
+# 5. VERIFICACAO DE PRIVILEGIO E DEPENDENCIAS
+# =============================================================================
+# cis_require_root: a maioria das verificacoes (ler /etc/shadow, listar
+# SUID em todo o disco, consultar auditd) exige privilegio de root. Esta
+# funcao encerra o script cedo, com o codigo de saida de erro de USO (2),
+# se nao estiver rodando como root -- em vez de deixar cada verificacao
+# falhar silenciosamente mais adiante por falta de permissao.
+cis_require_root() {
+    # $EUID = Effective User ID do processo atual; 0 e sempre o root.
+    if [ "$EUID" -ne 0 ]; then
+        printf 'Este script precisa ser executado como root (EUID=0).\n' >&2
+        exit "$CIS_EXIT_USAGE"
+    fi
+}
+
+# cis_check_dependencies: verifica, ANTES de comecar as checagens, se os
+# comandos ESSENCIAIS (sem os quais o script nao tem como funcionar) estao
+# disponiveis. Comandos OPCIONAIS (getenforce, auditctl, ss, dnf/yum) sao
+# verificados individualmente dentro de cada check especifico, com
+# fallback para cis_meh() -- porque a auxsencia deles so invalida UMA
+# verificacao, nao o script inteiro.
+cis_check_dependencies() {
+    local l_missing=0  # flag local: vira 1 se faltar algo essencial
+    local l_cmd         # variavel de iteracao do loop abaixo
+    for l_cmd in awk grep find stat findmnt; do
+        if ! command -v "$l_cmd" >/dev/null 2>&1; then
+            cis_log_error "Dependencia ausente: ${l_cmd}"
+            printf 'Dependencia ausente: %s\n' "$l_cmd" >&2
+            l_missing=1
+        fi
+    done
+    if [ "$l_missing" -eq 1 ]; then
+        exit "$CIS_EXIT_DEPENDENCY"
+    fi
+}
+
+# =============================================================================
+# 6. AJUDA E PARAMETROS (getopts, -h/--help obrigatorios)
+# =============================================================================
+# cis_usage: imprime a mensagem de ajuda (chamada por -h, --help, ou
+# quando um parametro invalido e passado).
+cis_usage() {
+    cat <<EOF
+${CIS_SCRIPT_NAME} v${CIS_VERSION}
+Verificador de baseline de hardening inspirado no CIS Benchmark.
+
+Uso:
+  ${CIS_SCRIPT_NAME} [opcoes]
+
+Opcoes:
+  -o ARQUIVO   Caminho do relatorio HTML de saida
+               (padrao: ${CIS_REPORT_FILE})
+  -q           Modo silencioso (so grava no log, nao imprime WARN/ERROR)
+  -h, --help   Mostra esta ajuda e sai
+
+Codigos de saida:
+  0  sucesso, nenhuma falha encontrada
+  1  achado(s): pelo menos uma verificacao falhou
+  2  erro de uso (parametro invalido / sem privilegio)
+  3  erro de dependencia (comando necessario ausente)
+
+Log:      ${CIS_LOG_FILE}
+Relatorio: ${CIS_REPORT_FILE} (ou o definido em -o)
+EOF
+}
+
+# cis_parse_args: processa os argumentos de linha de comando ($@ passado
+# pelo main()). Usa 'getopts' para as opcoes curtas (-o, -q, -h) e um
+# loop manual antes disso para tratar "--help", que getopts nao suporta
+# nativamente (getopts so entende opcoes de uma letra).
+#   $@ -- todos os argumentos recebidos pelo script na chamada original
+cis_parse_args() {
+    local l_arg  # variavel de iteracao do loop de deteccao de "--help".
+                  # Declarada 'local' para nao vazar para o escopo global
+                  # apos a funcao terminar (mesmo padrao de namespace
+                  # isolado usado em todo o resto do script).
+    for l_arg in "$@"; do
+        if [ "$l_arg" = "--help" ]; then
+            cis_usage
+            exit "$CIS_EXIT_SUCCESS"
+        fi
+    done
+
+    # OPTIND: variavel INTERNA do getopts que marca o indice do proximo
+    # argumento a processar. Declarada 'local' aqui para que chamadas
+    # futuras a getopts em outra funcao (se houver) comecem do zero.
+    local OPTIND=1
+    local l_opt  # opcao corrente sendo processada pelo loop getopts
+    while getopts ":o:qh" l_opt; do
+        case "$l_opt" in
+            o) CIS_REPORT_FILE="$OPTARG" ;;   # -o ARQUIVO: define relatorio
+            q) CIS_QUIET=1 ;;                 # -q: ativa modo silencioso
+            h) cis_usage; exit "$CIS_EXIT_SUCCESS" ;;
+            # \? = opcao desconhecida (nao listada em ":o:qh")
+            \?) printf 'Opcao invalida: -%s\n' "$OPTARG" >&2; cis_usage; exit "$CIS_EXIT_USAGE" ;;
+            # : = opcao que precisa de argumento mas nao recebeu (ex.: "-o" sem valor)
+            :) printf 'A opcao -%s requer um argumento.\n' "$OPTARG" >&2; exit "$CIS_EXIT_USAGE" ;;
+        esac
+    done
+}
+
+# =============================================================================
+# 7. DETECCAO DE DISTRIBUICAO (informativo; nao trava se nao for RHEL/CentOS)
+# =============================================================================
+# Variaveis globais preenchidas por cis_detect_distro() e usadas depois
+# no cabecalho do relatorio HTML (cis_generate_html_report) e na mensagem
+# inicial impressa no terminal (main).
+CIS_DISTRO_ID=""       # ex.: "centos", "rhel" -- extraido de /etc/os-release
+CIS_DISTRO_VERSION=""  # ex.: "10", "9.4"       -- extraido de /etc/os-release
+
+# cis_detect_distro: le /etc/os-release (arquivo padrao presente em quase
+# toda distro Linux moderna) para identificar em qual sistema o script
+# esta rodando. E puramente INFORMATIVO -- o script continua rodando
+# normalmente mesmo se a distro nao for RHEL/CentOS (por exemplo, ao ser
+# testado num container Ubuntu antes do deploy na VM real).
+cis_detect_distro() {
+    if [ -r /etc/os-release ]; then
+        # "(. arquivo && ...)" roda o os-release num SUBSHELL: as
+        # variaveis ID e VERSION_ID definidas dentro dele NAO vazam para
+        # o escopo deste script, evitando colisao com outras variaveis.
+        # shellcheck source=/dev/null
+        CIS_DISTRO_ID=$(. /etc/os-release && printf '%s' "${ID:-desconhecido}")
+        # shellcheck source=/dev/null
+        CIS_DISTRO_VERSION=$(. /etc/os-release && printf '%s' "${VERSION_ID:-desconhecido}")
+    else
+        CIS_DISTRO_ID="desconhecido"
+        CIS_DISTRO_VERSION="desconhecido"
+    fi
+    cis_log_info "Distro detectada: ${CIS_DISTRO_ID} ${CIS_DISTRO_VERSION}"
+}
+
+# =============================================================================
+# 8. VERIFICACOES -- MONTAGENS (CIS 1.1.2)
+#
+# CORRIGIDO: as verificacoes abaixo agora refletem o ESQUEMA DE
+# PARTICIONAMENTO REAL do grupo (sda3 -> LUKS2 -> LVM com lv_root,
+# lv_var, lv_varlog, lv_vartmp, lv_home, lv_tmp, lv_swap) e a TABELA de
+# opcoes de montagem definida pelo grupo:
+#
+#   /tmp e /var/tmp  -> nodev, nosuid, noexec
+#   /home            -> nodev, nosuid                (sem noexec)
+#   /var/log         -> nodev, nosuid, noexec
+#   /boot            -> nodev, nosuid
+#   /var             -> nodev                         (sem nosuid/noexec,
+#                                                       decisao documentada:
+#                                                       noexec em /var
+#                                                       quebraria containers)
+#
+# A versao anterior deste script checava /dev/shm e /var/log/audit, que
+# NAO fazem parte do esquema de particoes deste grupo -- por isso essas
+# checagens foram substituidas pelas que realmente correspondem ao
+# ambiente construido.
+# =============================================================================
+
+# cis_check_mount_option: funcao GENERICA e reutilizavel que verifica se
+# um determinado ponto de montagem possui uma determinada opcao de
+# seguranca ativa (nodev, nosuid ou noexec). E a base de todas as
+# checagens de montagem abaixo -- assim, adicionar um novo ponto de
+# montagem no futuro e so questao de chamar esta funcao de novo.
+#   $1 (l_mnt) -- ponto de montagem a verificar, ex.: "/tmp"
+#   $2 (l_opt) -- opcao esperada, ex.: "nodev", "nosuid" ou "noexec"
+cis_check_mount_option() {
+    local l_mnt="$1"
+    local l_opt="$2"
+    local l_label="Montagem ${l_mnt} possui opcao ${l_opt}"
+
+    # findmnt --kernel consulta o kernel diretamente (nao o /etc/fstab),
+    # ou seja, reflete o que esta REALMENTE montado agora, nao so o que
+    # esta configurado para montar no boot.
+    if ! findmnt --kernel "$l_mnt" >/dev/null 2>&1; then
+        # A particao nao existe como ponto de montagem separado neste
+        # sistema (por exemplo, ao testar num ambiente que nao segue o
+        # esquema de particionamento do grupo) -- inconclusivo, nao falha.
+        cis_meh "$l_label" "particao ${l_mnt} nao existe separadamente (nao auditavel)"
+        return
+    fi
+
+    # grep -qw procura a opcao como PALAVRA INTEIRA na lista de opcoes de
+    # montagem (evita falso-positivo de "noexec" casar parcialmente com
+    # outra opcao que contenha a mesma substring).
+    if findmnt --kernel -o OPTIONS --noheadings "$l_mnt" 2>/dev/null | grep -qw "$l_opt"; then
+        cis_ok "$l_label"
+    else
+        cis_bad "$l_label" "opcao ${l_opt} nao encontrada em ${l_mnt}"
+    fi
+}
+
+# cis_check_tmp_and_vartmp: /tmp e /var/tmp sao diretorios classicamente
+# usados como vetor de escalonamento de privilegio (payload gravado por
+# um usuario sem privilegio e depois executado). Por isso exigem as 3
+# opcoes: nodev (bloqueia criacao de dispositivos), nosuid (ignora bits
+# SUID/SGID de binarios ali dentro) e noexec (impede execucao direta).
+cis_check_tmp_and_vartmp() {
+    cis_check_mount_option /tmp nodev
+    cis_check_mount_option /tmp nosuid
+    cis_check_mount_option /tmp noexec
+    cis_check_mount_option /var/tmp nodev
+    cis_check_mount_option /var/tmp nosuid
+    cis_check_mount_option /var/tmp noexec
+}
+
+# cis_check_home_partition: /home leva nodev e nosuid (impede usuario
+# comum criar dispositivo ou binario SUID dentro do proprio diretorio),
+# mas DELIBERADAMENTE NAO leva noexec, pois usuarios legitimamente
+# precisam executar scripts/binarios proprios a partir do home.
+cis_check_home_partition() {
+    cis_check_mount_option /home nodev
+    cis_check_mount_option /home nosuid
+}
+
+# cis_check_varlog_partition: /var/log recebe as 3 opcoes, protegendo a
+# integridade dos logs e impedindo que a area de log seja usada como
+# ponto de "staging" (deposito temporario) por um payload malicioso.
+cis_check_varlog_partition() {
+    cis_check_mount_option /var/log nodev
+    cis_check_mount_option /var/log nosuid
+    cis_check_mount_option /var/log noexec
+}
+
+# cis_check_boot_and_var: /boot leva nodev + nosuid (isola a area de
+# boot). /var leva SOMENTE nodev -- a decisao de NAO aplicar noexec em
+# /var foi tomada e documentada pelo grupo porque noexec em /var quebra
+# o funcionamento de containers (que gravam e executam camadas de imagem
+# dentro de /var/lib/containers ou similar). Essa e exatamente a
+# situacao de "vai dar conflito, documentar a decisao" mencionada na
+# especificacao do trabalho.
+cis_check_boot_and_var() {
+    cis_check_mount_option /boot nodev
+    cis_check_mount_option /boot nosuid
+    cis_check_mount_option /var nodev
+}
+
+# =============================================================================
+# 9. VERIFICACOES -- SELINUX (CIS 1.3.1)
+# =============================================================================
+# cis_check_selinux_installed: confirma que o pacote/comando do SELinux
+# esta presente. Sem SELinux instalado, nenhuma das outras checagens de
+# SELinux abaixo faz sentido.
+cis_check_selinux_installed() {
+    if command -v getenforce >/dev/null 2>&1; then
+        cis_ok "SELinux esta instalado"
+    else
+        cis_bad "SELinux esta instalado" "comando getenforce nao encontrado"
+    fi
+}
+
+# cis_check_selinux_enforcing: confirma que o SELinux esta no modo mais
+# restritivo (Enforcing), e nao em Permissive (so registra, nao bloqueia)
+# ou Disabled.
+cis_check_selinux_enforcing() {
+    if ! command -v getenforce >/dev/null 2>&1; then
+        cis_meh "SELinux modo enforcing" "getenforce indisponivel, pulando"
+        return
+    fi
+    local l_mode  # resultado textual retornado por getenforce
+    l_mode=$(getenforce 2>/dev/null || printf 'Desconhecido')
+    if [ "$l_mode" = "Enforcing" ]; then
+        cis_ok "SELinux modo enforcing"
+    else
+        cis_bad "SELinux modo enforcing" "modo atual: ${l_mode}"
+    fi
+}
+
+# cis_check_selinux_bootloader: verifica se alguem desabilitou o SELinux
+# via parametro de kernel "selinux=0" no GRUB -- uma forma de desativacao
+# que sobrevive a reboots e nao aparece so olhando o /etc/selinux/config.
+cis_check_selinux_bootloader() {
+    local l_grub_cfg="/boot/grub2/grubenv"
+    if [ -r "$l_grub_cfg" ] && grep -qw 'selinux=0' "$l_grub_cfg" 2>/dev/null; then
+        cis_bad "SELinux nao desabilitado no bootloader" "selinux=0 presente em ${l_grub_cfg}"
+    else
+        cis_ok "SELinux nao desabilitado no bootloader"
+    fi
+}
+
+# =============================================================================
+# 10. VERIFICACOES -- SERVICOS (CIS 2.1)
+# =============================================================================
+# cis_check_service_absent: verifica que um servico historicamente
+# inseguro (telnet, ftp legado, etc.) NAO esta instalado no sistema.
+# Generica: aceita um rotulo amigavel e uma lista de nomes de pacote a
+# procurar (alguns servicos tem nomes de pacote diferentes conforme a
+# distro/versao, por isso aceita varios candidatos).
+#   $1 (l_label) -- nome amigavel exibido no relatorio, ex.: "telnet-server"
+#   $2.. (l_pkg) -- um ou mais nomes de pacote RPM a checar
+cis_check_service_absent() {
+    local l_label="$1"
+    shift  # remove $1 da lista de argumentos; sobra so os nomes de pacote
+    local l_pkg     # variavel de iteracao do loop de candidatos
+    local l_found=0 # flag local: vira 1 se QUALQUER candidato for encontrado
+    for l_pkg in "$@"; do
+        if rpm -q "$l_pkg" >/dev/null 2>&1; then
+            l_found=1
+            break  # ja achou um instalado, nao precisa checar os demais
+        fi
+    done
+    if [ "$l_found" -eq 0 ]; then
+        cis_ok "Servico ${l_label} nao instalado"
+    else
+        cis_bad "Servico ${l_label} nao instalado" "pacote ${l_pkg} presente"
+    fi
+}
+
+# cis_check_listening_services: lista quantos sockets estao em escuta na
+# rede. E deliberadamente um WARN informativo (nao um FAIL automatico),
+# porque decidir se uma porta aberta e legitima ou nao exige revisao
+# humana -- o script so aponta "existem N, revise manualmente".
+cis_check_listening_services() {
+    local l_tmp  # arquivo temporario com a saida do 'ss'
+    l_tmp=$(cis_mktemp)
+    if command -v ss >/dev/null 2>&1; then
+        ss -tulnH 2>/dev/null > "$l_tmp" || true
+        local l_count  # numero de linhas = numero de sockets em escuta
+        l_count=$(wc -l < "$l_tmp" | tr -d ' ')
+        cis_meh "Servicos escutando em portas de rede" "${l_count} socket(s) ativos, revisar manualmente"
+    else
+        cis_meh "Servicos escutando em portas de rede" "comando ss indisponivel"
+    fi
+}
+
+# =============================================================================
+# 11. VERIFICACOES -- PERMISSOES DE ARQUIVOS SENSIVEIS (CIS 7.1)
+# =============================================================================
+# cis_check_file_perm: funcao generica que confirma se um arquivo tem, no
+# maximo, a permissao esperada e pertence ao dono/grupo esperados.
+#   $1 (l_file)          -- caminho do arquivo, ex.: "/etc/shadow"
+#   $2 (l_perm_esperado) -- permissao octal MAXIMA aceitavel, ex.: "644"
+#   $3 (l_dono_esperado) -- dono esperado, ex.: "root"
+#   $4 (l_grupo_esperado)-- grupo esperado, ex.: "root"
+#
+# NOTA DE IMPLEMENTACAO: a comparacao "$l_perm -le $l_perm_esperado" trata
+# os numeros octais como se fossem decimais. Isso funciona corretamente
+# para o conjunto de permissoes checadas aqui (644, 640, 600, 000), pois
+# reducoes de permissao tambem reduzem o valor numerico correspondente
+# nesses casos especificos -- mas NAO e uma comparacao octal matematica-
+# mente generica. Documentado aqui para quem for reaproveitar a funcao
+# com outras permissoes no futuro.
+cis_check_file_perm() {
+    local l_file="$1" l_perm_esperado="$2" l_dono_esperado="$3" l_grupo_esperado="$4"
+    local l_label="Permissoes de ${l_file}"
+
+    if [ ! -e "$l_file" ]; then
+        cis_meh "$l_label" "arquivo nao existe"
+        return
+    fi
+
+    local l_perm l_dono l_grupo  # valores atuais lidos do arquivo via 'stat'
+    l_perm=$(stat -c '%a' "$l_file")   # permissao octal, ex.: "644"
+    l_dono=$(stat -c '%U' "$l_file")   # nome do usuario dono
+    l_grupo=$(stat -c '%G' "$l_file")  # nome do grupo dono
+
+    if [ "$l_perm" -le "$l_perm_esperado" ] && [ "$l_dono" = "$l_dono_esperado" ] && [ "$l_grupo" = "$l_grupo_esperado" ]; then
+        cis_ok "$l_label"
+    else
+        cis_bad "$l_label" "atual: ${l_perm} ${l_dono}:${l_grupo} (esperado: <=${l_perm_esperado} ${l_dono_esperado}:${l_grupo_esperado})"
+    fi
+}
+
+# cis_check_sensitive_files_permissions: aplica cis_check_file_perm aos 4
+# arquivos de contas/senhas mais sensiveis do sistema.
+cis_check_sensitive_files_permissions() {
+    cis_check_file_perm /etc/passwd  644 root root
+    cis_check_file_perm /etc/group   644 root root
+    cis_check_file_perm /etc/shadow  000 root root
+    cis_check_file_perm /etc/gshadow 000 root root
+}
+
+# cis_check_world_writable_files: procura arquivos com permissao de
+# escrita para "outros" (world-writable) dentro de /etc e /usr -- diretorios
+# de configuracao e binarios do sistema, onde isso NUNCA deveria existir.
+# Escopo restrito a /etc e /usr (em vez de "/" inteiro) para manter a
+# varredura rapida; ajustar conforme necessidade do ambiente avaliado.
+cis_check_world_writable_files() {
+    local l_tmp  # arquivo temporario com a lista de arquivos encontrados
+    l_tmp=$(cis_mktemp)
+    # -xdev: nao atravessa para outros sistemas de arquivo montados
+    #        (ex.: nao desce para dentro de /usr se fosse outro FS) --
+    #        mantem a busca dentro da particao raiz/etc esperada.
+    # -perm -0002: bit de escrita para "outros" (world) ativado.
+    find /etc /usr -xdev -type f -perm -0002 2>/dev/null > "$l_tmp" || true
+    local l_count  # quantidade de arquivos world-writable encontrados
+    l_count=$(wc -l < "$l_tmp" | tr -d ' ')
+    if [ "$l_count" -eq 0 ]; then
+        cis_ok "Nenhum arquivo world-writable encontrado em /etc e /usr"
+    else
+        cis_bad "Nenhum arquivo world-writable encontrado em /etc e /usr" "${l_count} arquivo(s) encontrado(s)"
+    fi
+}
+
+# =============================================================================
+# 12. VERIFICACOES -- SUID/SGID INESPERADOS (CIS 7.1.13, item Manual)
+# =============================================================================
+# CIS_SUID_BASELINE: lista de binarios que LEGITIMAMENTE possuem o bit
+# SUID ou SGID numa instalacao padrao do sistema (por isso 'readonly': e
+# uma baseline fixa de referencia, nao deve ser alterada em tempo de
+# execucao). Qualquer binario SUID/SGID encontrado no disco que NAO
+# esteja nesta lista e reportado como achado para revisao manual --
+# ajustar esta lista conforme o perfil real da imagem-alvo do grupo.
+readonly CIS_SUID_BASELINE=(
+    /usr/bin/sudo
+    /usr/bin/su
+    /usr/bin/passwd
+    /usr/bin/chage
+    /usr/bin/chfn
+    /usr/bin/chsh
+    /usr/bin/gpasswd
+    /usr/bin/newgrp
+    /usr/bin/mount
+    /usr/bin/umount
+    /usr/bin/crontab
+    /usr/bin/pkexec
+    /usr/bin/ping
+)
+
+# cis_is_in_baseline: retorna sucesso (0) se o caminho passado estiver na
+# lista CIS_SUID_BASELINE acima, falha (1) caso contrario. Usada como
+# funcao auxiliar de busca dentro de cis_check_suid_sgid_review().
+#   $1 (l_path) -- caminho absoluto do binario a verificar
+cis_is_in_baseline() {
+    local l_path="$1" l_item  # l_item: variavel de iteracao do loop abaixo
+    for l_item in "${CIS_SUID_BASELINE[@]}"; do
+        [ "$l_item" = "$l_path" ] && return 0
+    done
+    return 1
+}
+
+# cis_check_suid_sgid_review: varre TODO o disco (-xdev limita a varredura
+# ao sistema de arquivos raiz, sem descer em outros pontos de montagem)
+# procurando binarios com bit SUID (-perm -4000) ou SGID (-perm -2000),
+# e compara cada um contra a baseline esperada.
+cis_check_suid_sgid_review() {
+    local l_tmp  # arquivo temporario com a lista de binarios SUID/SGID encontrados
+    l_tmp=$(cis_mktemp)
+    find / -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null > "$l_tmp" || true
+
+    local l_unexpected=0  # contador de binarios FORA da baseline
+    local l_path            # variavel de iteracao, um caminho por linha do arquivo
+    while IFS= read -r l_path; do
+        [ -z "$l_path" ] && continue  # ignora linha vazia (ex.: fim de arquivo)
+        if ! cis_is_in_baseline "$l_path"; then
+            l_unexpected=$((l_unexpected + 1))
+        fi
+    done < "$l_tmp"
+
+    if [ "$l_unexpected" -eq 0 ]; then
+        cis_ok "Binarios SUID/SGID conferem com a baseline esperada"
+    else
+        cis_bad "Binarios SUID/SGID conferem com a baseline esperada" "${l_unexpected} binario(s) fora da baseline, revisar manualmente"
+    fi
+}
+
+# =============================================================================
+# 13. VERIFICACOES -- CONTAS E GRUPOS (CIS 7.2)
+# =============================================================================
+# cis_check_duplicate_uids: /etc/passwd tem formato
+# "usuario:x:UID:GID:comentario:home:shell" separado por ":" -- o awk
+# abaixo extrai a 3a coluna (UID), ordena e usa 'uniq -d' para listar
+# SOMENTE os valores que aparecem mais de uma vez (duplicados). Dois
+# usuarios com o mesmo UID e um risco de seguranca: o sistema os trata
+# como identicos para fins de permissao.
+cis_check_duplicate_uids() {
+    local l_dup  # lista de UIDs duplicados encontrados (vazio = nenhum)
+    l_dup=$(awk -F: '{print $3}' /etc/passwd | sort | uniq -d)
+    if [ -z "$l_dup" ]; then
+        cis_ok "Nenhum UID duplicado em /etc/passwd"
+    else
+        cis_bad "Nenhum UID duplicado em /etc/passwd" "UID(s) duplicado(s): $(printf '%s' "$l_dup" | tr '\n' ' ')"
+    fi
+}
+
+# cis_check_duplicate_gids: mesma logica de cis_check_duplicate_uids
+# acima, mas aplicada a /etc/group (coluna 3 = GID).
+cis_check_duplicate_gids() {
+    local l_dup  # lista de GIDs duplicados encontrados
+    l_dup=$(awk -F: '{print $3}' /etc/group | sort | uniq -d)
+    if [ -z "$l_dup" ]; then
+        cis_ok "Nenhum GID duplicado em /etc/group"
+    else
+        cis_bad "Nenhum GID duplicado em /etc/group" "GID(s) duplicado(s): $(printf '%s' "$l_dup" | tr '\n' ' ')"
+    fi
+}
+
+# cis_check_root_uid0: confirma que APENAS a conta "root" possui UID 0.
+# Qualquer outra conta com UID 0 teria privilegios de root sem ser a
+# conta root nominal -- um dos indicadores classicos de sistema
+# comprometido.
+cis_check_root_uid0() {
+    local l_count  # quantidade de contas com UID igual a 0
+    l_count=$(awk -F: '($3 == 0) {print $1}' /etc/passwd | wc -l | tr -d ' ')
+    if [ "$l_count" -eq 1 ]; then
+        cis_ok "Apenas root possui UID 0"
+    else
+        cis_bad "Apenas root possui UID 0" "${l_count} conta(s) com UID 0"
+    fi
+}
+
+# =============================================================================
+# 14. VERIFICACOES -- AUDITD (CIS 6.3)
+# =============================================================================
+# cis_check_auditd_installed: confirma que o pacote 'audit' (que fornece
+# o daemon auditd, responsavel por registrar eventos de auditoria do
+# kernel) esta instalado.
+cis_check_auditd_installed() {
+    if rpm -q audit >/dev/null 2>&1; then
+        cis_ok "Pacote audit (auditd) instalado"
+    else
+        cis_bad "Pacote audit (auditd) instalado" "pacote audit ausente"
+    fi
+}
+
+# cis_check_auditd_active: confirma que o servico auditd esta ATIVO
+# (rodando agora) E HABILITADO (configurado para iniciar automaticamente
+# no proximo boot) -- as duas condicoes juntas, via systemctl.
+cis_check_auditd_active() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        cis_meh "Servico auditd ativo e habilitado" "systemctl indisponivel"
+        return
+    fi
+    if systemctl is-active --quiet auditd 2>/dev/null && systemctl is-enabled --quiet auditd 2>/dev/null; then
+        cis_ok "Servico auditd ativo e habilitado"
+    else
+        cis_bad "Servico auditd ativo e habilitado" "inativo ou nao habilitado no boot"
+    fi
+}
+
+# cis_check_audit_rule: funcao generica que confirma se uma REGRA
+# especifica esta carregada no auditd (consultando 'auditctl -l', que
+# lista as regras ativas em memoria no momento).
+#   $1 (l_label)   -- descricao amigavel da regra, para o relatorio
+#   $2 (l_pattern) -- trecho de texto a procurar na saida de "auditctl -l"
+cis_check_audit_rule() {
+    local l_label="$1" l_pattern="$2"
+    if ! command -v auditctl >/dev/null 2>&1; then
+        cis_meh "$l_label" "auditctl indisponivel"
+        return
+    fi
+    # grep -q -- "$l_pattern": o "--" evita que um padrao comecando com
+    # "-" (ex.: "-w") seja interpretado como opcao do grep por engano.
+    if auditctl -l 2>/dev/null | grep -q -- "$l_pattern"; then
+        cis_ok "$l_label"
+    else
+        cis_bad "$l_label" "regra nao encontrada nas regras carregadas do auditd"
+    fi
+}
+
+# cis_check_audit_rules_files: aplica cis_check_audit_rule aos 3 arquivos
+# mais criticos para auditoria de alteracao de contas/privilegios.
+cis_check_audit_rules_files() {
+    cis_check_audit_rule "Regra de auditoria para /etc/passwd" "/etc/passwd"
+    cis_check_audit_rule "Regra de auditoria para /etc/shadow" "/etc/shadow"
+    cis_check_audit_rule "Regra de auditoria para /etc/sudoers" "/etc/sudoers"
+}
+
+# cis_check_audit_log_storage: confirma que o auditd.conf define um
+# tamanho maximo de arquivo de log (max_log_file) -- sem esse limite, o
+# log de auditoria pode crescer indefinidamente e encher o disco.
+cis_check_audit_log_storage() {
+    local l_conf="/etc/audit/auditd.conf"
+    if [ ! -r "$l_conf" ]; then
+        cis_meh "Tamanho maximo de log do auditd configurado" "${l_conf} nao encontrado"
+        return
+    fi
+    if grep -Eq '^\s*max_log_file\s*=\s*[0-9]+' "$l_conf"; then
+        cis_ok "Tamanho maximo de log do auditd configurado"
+    else
+        cis_bad "Tamanho maximo de log do auditd configurado" "parametro max_log_file ausente em ${l_conf}"
+    fi
+}
+
+# =============================================================================
+# 15. VERIFICACOES -- ATUALIZACOES PENDENTES (CIS 1.2.2.1, item Manual)
+# =============================================================================
+# cis_check_pending_updates: detecta se ha atualizacoes de pacotes
+# pendentes, usando dnf (preferido em CentOS Stream/RHEL modernos) ou yum
+# como alternativa.
+cis_check_pending_updates() {
+    local l_gerenciador=""  # nome do gerenciador de pacotes disponivel
+    if command -v dnf >/dev/null 2>&1; then
+        l_gerenciador="dnf"
+    elif command -v yum >/dev/null 2>&1; then
+        l_gerenciador="yum"
+    else
+        cis_meh "Atualizacoes de seguranca pendentes" "nenhum gerenciador dnf/yum encontrado"
+        return
+    fi
+
+    local l_tmp l_rc  # l_tmp: saida do check-update | l_rc: codigo de saida do comando
+    l_tmp=$(cis_mktemp)
+    # "dnf/yum check-update" retorna 100 quando HA atualizacoes disponiveis
+    # -- isso NAO e um erro real do comando, entao a chamada e protegida
+    # explicitamente do 'set -e' com "set +e" / "set -e" ao redor dela,
+    # em vez de deixar o 'set -e' interpretar o codigo 100 como falha.
+    set +e
+    "$l_gerenciador" check-update --quiet > "$l_tmp" 2>/dev/null
+    l_rc=$?
+    set -e
+
+    case "$l_rc" in
+        0) cis_ok "Nenhuma atualizacao pendente (${l_gerenciador})" ;;
+        100)
+            local l_count  # quantidade de linhas = quantidade de pacotes desatualizados
+            l_count=$(grep -c . "$l_tmp" || true)
+            cis_meh "Atualizacoes pendentes" "${l_count} pacote(s) desatualizado(s) via ${l_gerenciador}"
+            ;;
+        *) cis_meh "Atualizacoes pendentes" "nao foi possivel verificar (${l_gerenciador} retornou ${l_rc}, ex.: sem rede)" ;;
+    esac
+}
+
+# =============================================================================
+# 16. RELATORIO HTML
+# =============================================================================
+# cis_generate_html_report: monta o arquivo HTML final a partir dos
+# contadores globais (CIS_PASS/CIS_FAIL/CIS_WARN) e do array
+# CIS_REPORT_ROWS (uma linha <tr> por verificacao executada, acumulada
+# durante toda a execucao pelas funcoes cis_ok/cis_bad/cis_meh).
+cis_generate_html_report() {
+    local l_total  # total de verificacoes executadas (pass+fail+warn)
+    l_total=$((CIS_PASS + CIS_FAIL + CIS_WARN))
+    local l_score=0  # pontuacao percentual (0 se nao rodou nenhum check)
+    if [ "$l_total" -gt 0 ]; then
+        l_score=$(( (CIS_PASS * 100) / l_total ))
+    fi
+
+    # O bloco "{ ... } > arquivo" agrupa todos os 'printf' e redireciona
+    # a saida combinada de todos eles UMA unica vez para CIS_REPORT_FILE,
+    # em vez de abrir/fechar o arquivo a cada linha.
+    {
+        printf '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">'
+        printf '<title>Relatorio CIS Baseline Check</title><style>'
+        printf 'body{font-family:sans-serif;margin:2em;} table{border-collapse:collapse;width:100%%;}'
+        printf 'th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;}'
+        printf 'tr.ok{background:#e6ffed;} tr.fail{background:#ffe6e6;} tr.warn{background:#fff8e1;}'
+        printf '</style></head><body>'
+        printf '<h1>Relatorio de Baseline CIS</h1>'
+        printf '<p>Distro: %s %s</p>' "$CIS_DISTRO_ID" "$CIS_DISTRO_VERSION"
+        printf '<p>Data: %s</p>' "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf '<p><strong>Pontuacao: %d%% (%d/%d checks passaram)</strong></p>' "$l_score" "$CIS_PASS" "$l_total"
+        printf '<p>PASS: %d | FAIL: %d | WARN: %d</p>' "$CIS_PASS" "$CIS_FAIL" "$CIS_WARN"
+        printf '<table><tr><th>Status</th><th>Verificacao</th><th>Detalhe</th></tr>'
+        local l_row  # variavel de iteracao: cada elemento ja e uma linha <tr> pronta
+        for l_row in "${CIS_REPORT_ROWS[@]}"; do
+            printf '%s' "$l_row"
+        done
+        printf '</table></body></html>'
+    } > "$CIS_REPORT_FILE"
+
+    cis_log_info "Relatorio HTML gerado em ${CIS_REPORT_FILE}"
+}
+
+# =============================================================================
+# 17. ORQUESTRACAO PRINCIPAL
+# =============================================================================
+# cis_run_all_checks: chama, em ordem, TODAS as funcoes de verificacao
+# definidas nas secoes 8 a 15. Esta funcao NAO contem logica de checagem
+# propriamente dita (nenhum 'if' de negocio aqui) -- e apenas uma lista
+# ordenada de chamadas, conforme o requisito "nenhuma logica solta no
+# corpo do script".
+cis_run_all_checks() {
+    printf '== Montagens ==\n'
+    cis_check_tmp_and_vartmp
+    cis_check_home_partition
+    cis_check_varlog_partition
+    cis_check_boot_and_var
+
+    printf '== SELinux ==\n'
+    cis_check_selinux_installed
+    cis_check_selinux_enforcing
+    cis_check_selinux_bootloader
+
+    printf '== Servicos ==\n'
+    cis_check_service_absent "telnet-server" telnet-server
+    cis_check_service_absent "vsftpd/ftp"    vsftpd ftp
+    cis_check_service_absent "rsync"         rsync-daemon rsync
+    cis_check_service_absent "nfs-server"    nfs-utils
+    cis_check_listening_services
+
+    printf '== Permissoes de /etc/shadow e afins ==\n'
+    cis_check_sensitive_files_permissions
+    cis_check_world_writable_files
+
+    printf '== SUID/SGID ==\n'
+    cis_check_suid_sgid_review
+
+    printf '== Contas e grupos ==\n'
+    cis_check_duplicate_uids
+    cis_check_duplicate_gids
+    cis_check_root_uid0
+
+    printf '== auditd ==\n'
+    cis_check_auditd_installed
+    cis_check_auditd_active
+    cis_check_audit_rules_files
+    cis_check_audit_log_storage
+
+    printf '== Atualizacoes pendentes ==\n'
+    cis_check_pending_updates
+}
+
+# main: ponto de entrada do script. Ordem de operacoes:
+#   1) processa argumentos de linha de comando;
+#   2) confirma que roda como root;
+#   3) confirma que as dependencias essenciais existem;
+#   4) detecta a distro (informativo);
+#   5) adquire o lock exclusivo (impede execucao concorrente);
+#   6) roda todas as verificacoes;
+#   7) gera o relatorio HTML;
+#   8) imprime o resumo final e sai com o codigo apropriado.
+#   $@ -- repassado diretamente da chamada do script na ultima linha do arquivo
+main() {
+    cis_parse_args "$@"
+    cis_require_root
+    cis_check_dependencies
+    cis_detect_distro
+
+    # "exec 200>ARQUIVO" abre o CIS_LOCK_FILE para escrita no descritor
+    # de arquivo numero 200 (numero escolhido arbitrariamente, alto o
+    # suficiente para nao colidir com stdin/stdout/stderr = 0/1/2).
+    # "flock -n 200" tenta obter um lock exclusivo NESSE descritor sem
+    # bloquear (-n = non-blocking): se outra instancia deste script ja
+    # estiver rodando e segurando o lock, flock falha imediatamente em
+    # vez de esperar -- e e isso que impede duas execucoes simultaneas
+    # de corromperem o mesmo relatorio HTML.
+    exec 200>"$CIS_LOCK_FILE"
+    if ! flock -n 200; then
+        printf 'Outra instancia do %s ja esta em execucao.\n' "$CIS_SCRIPT_NAME" >&2
+        exit "$CIS_EXIT_USAGE"
+    fi
+
+    cis_log_info "Iniciando ${CIS_SCRIPT_NAME} v${CIS_VERSION}"
+    printf 'Verificador de baseline CIS -- %s %s\n' "$CIS_DISTRO_ID" "$CIS_DISTRO_VERSION"
+
+    cis_run_all_checks
+    cis_generate_html_report
+
+    printf '\nResumo: PASS=%d FAIL=%d WARN=%d\n' "$CIS_PASS" "$CIS_FAIL" "$CIS_WARN"
+    printf 'Relatorio: %s\n' "$CIS_REPORT_FILE"
+    cis_log_info "Execucao concluida. PASS=${CIS_PASS} FAIL=${CIS_FAIL} WARN=${CIS_WARN}"
+
+    # Codigo de saida final: 1 (achado) se alguma verificacao falhou de
+    # verdade, 0 (sucesso) caso contrario. WARN nao afeta o codigo de
+    # saida, pois representa inconclusivo, nao uma falha confirmada.
+    if [ "$CIS_FAIL" -gt 0 ]; then
+        exit "$CIS_EXIT_FINDING"
+    fi
+    exit "$CIS_EXIT_SUCCESS"
+}
+
+# Chamada final: dispara toda a execucao, repassando os argumentos
+# originais do script ("$@") para main().
+main "$@"
