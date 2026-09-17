@@ -1,40 +1,44 @@
-# prompt usado para geração do código shell (maick rosario yamassaki)
+# Prompts usados — Grupo 6 (CentOS Stream)
 
-preciso que você desenvolva um script de shell completo, em bash, chamado cis-baseline-check.sh, com a função de atuar como um verificador de baseline de hardening para um servidor centos stream 10, tendo como referência técnica o cis red hat enterprise linux 10 benchmark v1.0.1.
+Registro dos prompts utilizados com IA para apoio na criação e depuração do script `cis-baseline-check.sh`.
 
-escopo funcional (mínimo de 25 verificações):
+---
 
-montagens (opções nodev/nosuid/noexec conforme aplicável a cada ponto de montagem)
-serviços (ausência de serviços inseguros e leitura de portas em escuta)
-selinux (instalado, em modo enforcing, não desabilitado via bootloader)
-permissões de /etc/shadow e arquivos afins (/etc/passwd, /etc/group, /etc/gshadow)
-suid/sgid inesperados (comparação com uma baseline de binários legítimos)
-auditd (instalado, ativo, regras carregadas, retenção de log configurada)
-atualizações pendentes (via dnf/yum)
+## Maick Rosario Yamassaki
 
-o script deve calcular uma pontuação final e gerar um relatório em html, servindo de base para posterior comparação com os resultados do openscap.
+### Prompt 1 — Geração do script completo
 
-requisitos técnicos obrigatórios:
+> Preciso que você desenvolva um script de shell completo, em bash, chamado `cis-baseline-check.sh`, com a função de atuar como um verificador de baseline de hardening para um servidor CentOS Stream 10, tendo como referência técnica o CIS Red Hat Enterprise Linux 10 Benchmark v1.0.1.
+>
+> **Escopo funcional (mínimo de 25 verificações):**
+> - Montagens (opções `nodev`/`nosuid`/`noexec` conforme aplicável a cada ponto de montagem)
+> - Serviços (ausência de serviços inseguros e leitura de portas em escuta)
+> - SELinux (instalado, em modo enforcing, não desabilitado via bootloader)
+> - Permissões de `/etc/shadow` e arquivos afins (`/etc/passwd`, `/etc/group`, `/etc/gshadow`)
+> - SUID/SGID inesperados (comparação com uma baseline de binários legítimos)
+> - auditd (instalado, ativo, regras carregadas, retenção de log configurada)
+> - Atualizações pendentes (via `dnf`/`yum`)
+>
+> O script deve calcular uma pontuação final e gerar um relatório em HTML, servindo de base para posterior comparação com os resultados do OpenSCAP.
+>
+> **Requisitos técnicos obrigatórios:**
+> - Modo estrito, `set -euo pipefail` logo após o shebang
+> - Funções, mínimo de 5, nenhuma lógica solta no corpo do script
+> - Parâmetros via `getopts` ou `case`; `-h` e `--help` obrigatórios
+> - Verificações de privilégio via `EUID` e de dependências via `command -v`
+> - Logging com timestamp, nível INFO/WARN/ERROR, arquivo em `/var/log/`
+> - Códigos de saída: 0 sucesso · 1 achado · 2 erro de uso · 3 erro de dependência
+> - Idempotência: rodar duas vezes deve produzir o mesmo estado final
+> - Sem segredo no código, nenhuma senha ou chave embutida no arquivo
+> - Limpeza via `trap` para temporários, sempre criados com `mktemp`
+> - Qualidade: o script deve passar no `shellcheck` sem erros
+> - Idioma: comentários e mensagens de saída em português
+>
+> Peço também que, além do código, explique a metodologia adotada para conseguir reproduzir o conteúdo de maneira didática.
 
-modo estrito, set -euo pipefail logo após o shebang
-funções, mínimo de 5, nenhuma lógica solta no corpo do script
-parâmetros, getopts ou case; -h e --help obrigatórios
-verificações, privilégio via euid e dependências via command -v
-logging, timestamp, nível info/warn/error, arquivo em /var/log/
-códigos de saída, 0 sucesso · 1 achado · 2 erro de uso · 3 erro de dependência
-idempotência, rodar duas vezes deve produzir o mesmo estado final
-sem segredo no código, nenhuma senha ou chave embutida no arquivo
-limpeza, uso de trap para temporários, sempre criados com mktemp
-qualidade, o script deve passar no shellcheck sem erros
-idioma, comentários e mensagens de saída em português
+### Resposta gerada pela IA
 
-peço também que, além do código, explique a metodologia adotada para conseguir reproduzir o conteúdo de maneira didatica
-
-
-
-# resposta gerada
-
-```
+```bash
 #!/usr/bin/env bash
 #
 # cis-baseline-check.sh
@@ -590,7 +594,7 @@ cis_check_pending_updates() {
 
     local l_tmp l_rc
     l_tmp=$(cis_mktemp)
-    
+
     set +e
     "$l_gerenciador" check-update --quiet > "$l_tmp" 2>/dev/null
     l_rc=$?
@@ -717,76 +721,348 @@ main() {
 }
 
 main "$@"
+```
 
+### Como a resposta gerada foi validada
 
+Após receber o script gerado, cada requisito foi validado tecnicamente antes de considerá-lo pronto para uso no laboratório/servidor:
 
------------------------------------------------------------------------------------------------------------------------------
+- Instalação do `shellcheck` e execução sobre o script, confirmando zero erros e zero avisos.
+- Execução do script como root, tanto no estado padrão (sem hardening aplicado) quanto após configurar o esquema de partições/LVM exigido.
+- Teste de idempotência na prática: rodando o script duas vezes seguidas e comparando os relatórios HTML gerados. Confirmação de que eram idênticos, tirando o timestamp que muda de acordo com a hora.
+- Teste de concorrência: execução de duas instâncias simultâneas do script, confirmando que o mecanismo de `flock` impediu a segunda instância de sobrescrever o relatório, retornando o código de saída correto (2, erro de uso).
+- Comparação dos relatórios HTML gerados antes e depois do hardening do servidor, o que permitiu identificar exatamente quais itens ainda dependiam de ação manual: opções de montagem no `/etc/fstab`, regras do auditd não carregadas e binários fora da baseline de SUID/SGID.
+- Aplicação manual das correções indicadas (edição do `/etc/fstab`, `mount -o remount`, criação de regras em `/etc/audit/rules.d/`) e reexecução do script para confirmar a evolução real da pontuação no ambiente.
 
+---
 
-como a resposta gerada foi validada
+### Prompt 2 — EXT4 vs XFS no `mount -o remount`
 
-após receber o script gerado, foi validado tecnicamente cada requisito antes de considerá-lo pronto para uso no laboratório/servidor
+> Por que só o EXT4 retornou uma "chave" (print do terminal, onde somente a linha do `/home` (EXT4) exibiu a mensagem `EXT4-fs (dm-12): re-mounted b823d88d...` após os comandos `mount -o remount`, enquanto as demais partições, todas em XFS, não imprimiram nada)?
 
-instalação do shellcheck e execução sobre o script, confirmando zero erros e zero avisos.
-execução do script como root, tanto no estado padrão (sem hardening aplicado) quanto após configurar o esquema de partições/lvm exigidos
-teste de idempotência na prática, rodando o script duas vezes seguidas e comparando os relatórios html gerados. confirmação de que eram idênticos, tirando o timestamp que altera de acordo com a hora
-teste de concorrência, executando duas instâncias simultâneas do script e confirmando que o mecanismo de flock impediu a segunda instância de sobrescrever o relatório, retornando o código de saída correto (2, erro de uso)
-comparação dos relatórios html gerados antes e depois do hardening do servidor, o que permitiu identificar exatamente quais itens ainda dependiam de ação manual: opções de montagem no /etc/fstab, regras do auditd não carregadas e binários fora da baseline de suid/sgid
-aplicação manual das correções indicadas (edição do /etc/fstab, mount -o remount, criação de regras em /etc/audit/rules.d/) e reexecução do script para confirmar a evolução real da pontuação no ambiente
+### Resposta gerada pela IA
 
------------------------------------------------------------------------------------------------------------------------------
-
-
-
-
-
-# prompt usado para entender porque somente o ext4 retornou uma chave na hora de executar mount -o remount (ext4 vs xfs) (maick rosario yamassaki)
-
-
-"porque so o EXT4 retornou a chave (print do terminal, onde somente  a linha do /home (ext4) tinha exibido a mensagem EXT4-fs (dm-12): re-mounted b823d88d... após os comandos mount -o remount, enquanto as demais partições, todas em xfs, não imprimiram nada.)
-
-resposta que a ia deu:
 Nenhum erro aí, é só uma diferença de verbosidade entre os drivers de sistema de arquivos no kernel, não indica que os outros falharam.
-Por que só o /home (ext4) imprimiu mensagem
-/home é ext4. o driver ext4 do kernel Linux tem por hábito emitir uma mensagem no log de kernel (dmesg) sempre que um remount acontece, do tipo EXT4 fs (dm XX): re mounted b823d88d... Isso é um comportamento conhecido e documentado do próprio módulo ext4, não é algo que vocês fizeram diferente.
-Todos os outros (/tmp, /var/tmp, /var/log, /var, /boot) são xfs. o driver xfs, ao contrário do ext4, não imprime nada no console em um remount bem sucedido. Silêncio ali é o comportamento normal e esperado do xfs.
-Como confirmar que os outros realmente funcionaram
-Em Linux, mount (e mount -o remount) segue a convenção padrão de programas Unix: nenhuma saída = sucesso. Se algum remount do xfs tivesse falhado, você teria visto uma mensagem de erro em vermelho tipo mount: /var/log: mount point is busy ou similar, e isso não apareceu em nenhuma das 5 linhas xfs.
-De qualquer forma, não precisa confiar só na ausência de erro, vamos confirmar de fato:
+
+**Por que só o `/home` (EXT4) imprimiu mensagem**
+
+`/home` é EXT4. O driver EXT4 do kernel Linux tem por hábito emitir uma mensagem no log de kernel (`dmesg`) sempre que um remount acontece, do tipo `EXT4-fs (dm-XX): re-mounted b823d88d...`. Isso é um comportamento conhecido e documentado do próprio módulo EXT4, não é algo que vocês fizeram diferente.
+
+Todos os outros (`/tmp`, `/var/tmp`, `/var/log`, `/var`, `/boot`) são XFS. O driver XFS, ao contrário do EXT4, não imprime nada no console em um remount bem-sucedido. Silêncio ali é o comportamento normal e esperado do XFS.
+
+**Como confirmar que os outros realmente funcionaram**
+
+Em Linux, `mount` (e `mount -o remount`) segue a convenção padrão de programas Unix: nenhuma saída = sucesso. Se algum remount do XFS tivesse falhado, apareceria uma mensagem de erro em vermelho do tipo `mount: /var/log: mount point is busy` ou similar, e isso não apareceu em nenhuma das 5 linhas XFS.
+
+De qualquer forma, não precisa confiar só na ausência de erro — dá pra confirmar de fato:
+
+```bash
 findmnt -o TARGET,OPTIONS /tmp /var/tmp /home /var/log /boot /var
-Roda isso e me manda o print. Se as opções nodev/nosuid/noexec aparecerem certinho em cada linha, está tudo aplicado de verdade, e aí sim pode rodar o cis-baseline-check.sh de novo.
+```
 
------------------------------------------------------------------------------------------------------------------------------
+Se as opções `nodev`/`nosuid`/`noexec` aparecerem certinho em cada linha, está tudo aplicado de verdade, e aí sim pode rodar o `cis-baseline-check.sh` de novo.
 
+---
 
+### Prompt 3 — Colunas do `/etc/fstab`
 
+> Estou no diretório `/etc`, rodei `vim /etc/fstab` pra aplicar as opções `nodev`, `nosuid` e `noexec` nas partições que o professor pediu (`/tmp`, `/var/tmp`, `/home`, `/var/log`, `/boot`, `/var`). Reparei que a linha do `/home` termina em `1 2`, enquanto todas as outras terminam em `0 0`. Por que só essa linha é diferente, e o que esses números significam? Preciso saber se isso interfere na hora de inserir as opções de montagem.
 
-
-
-
-
-
-# dúvida nas colunas do /etc/fstab (maick rosario yamassaki)
-
-prompt enviado:
-
-"Estou no diretório /etc, rodei vim /etc/fstab pra aplicar as opções nodev, nosuid e noexec nas partições que o professor pediu (/tmp, /var/tmp, /home, /var/log, /boot, /var). Reparei que a linha do /home termina em 1 2, enquanto todas as outras terminam em 0 0. Por que só essa linha é diferente, e o que esses números significam? Preciso saber se isso interfere na hora de inserir as opções de montagem."
-
-
-
-
-resposta que a ia deu:
+### Resposta gerada pela IA
 
 Boa observação, mas isso não afeta o que vamos editar. Deixa eu explicar por quê.
-O que são esses dois números finais
-No /etc/fstab, cada linha tem 6 colunas: dispositivo | ponto_de_montagem | tipo | opções | dump | passo_fsck. Os dois últimos números (0 0, 1 2, etc.) são:
-dump: se o utilitário antigo dump deve fazer backup dessa partição (quase sempre 0 hoje em dia, ninguém usa)
-passo_fsck: ordem de checagem do fsck no boot: 0 = nunca checa, 1 = checa primeiro (só a raiz / usa isso), 2 = checa depois da raiz
-No caso do /home, o Anaconda (instalador) colocou 1 2 porque decidiu que essa partição deve ser verificada no boot (fsck), isso é uma escolha de integridade do sistema de arquivos, não tem nada a ver com segurança de montagem (nodev/nosuid). Não precisa mexer nesses dois números.
-Por que o sed que te passei continua funcionando
-O comando busca e substitui só o texto x-systemd.device-timeout=0, que está na coluna de opções, ele não toca no que vem depois (1 2 ou 0 0), porque a substituição é só daquele trecho específico, sem tocar no resto da linha.
-Então a linha do /home:
-UUID=b823d88d a1a0 4901 bcb2 c6682ee6353a /home ext4 defaults,x systemd.device timeout=0 1 2
+
+**O que são esses dois números finais**
+
+No `/etc/fstab`, cada linha tem 6 colunas: `dispositivo | ponto_de_montagem | tipo | opções | dump | passo_fsck`. Os dois últimos números (`0 0`, `1 2`, etc.) são:
+
+- **dump**: se o utilitário antigo `dump` deve fazer backup dessa partição (quase sempre `0` hoje em dia, ninguém usa).
+- **passo_fsck**: ordem de checagem do `fsck` no boot — `0` = nunca checa, `1` = checa primeiro (só a raiz `/` usa isso), `2` = checa depois da raiz.
+
+No caso do `/home`, o Anaconda (instalador) colocou `1 2` porque decidiu que essa partição deve ser verificada no boot (`fsck`). Isso é uma escolha de integridade do sistema de arquivos, não tem nada a ver com segurança de montagem (`nodev`/`nosuid`). Não precisa mexer nesses dois números.
+
+**Por que o `sed` continua funcionando**
+
+O comando busca e substitui só o texto `x-systemd.device-timeout=0`, que está na coluna de opções — ele não toca no que vem depois (`1 2` ou `0 0`), porque a substituição é só daquele trecho específico, sem tocar no resto da linha.
+
+Então a linha do `/home`:
+
+```
+UUID=b823d88d-a1a0-4901-bcb2-c6682ee6353a /home ext4 defaults,x-systemd.device-timeout=0 1 2
+```
+
 vira:
-UUID=b823d88d a1a0 4901 bcb2 c6682ee6353a /home ext4 defaults,x systemd.device timeout=0,nodev,nosuid 1 2
-O 1 2 no final permanece intacto, é exatamente o comportamento esperado. Pode rodar o sed sem preocupação com isso.
+
+```
+UUID=b823d88d-a1a0-4901-bcb2-c6682ee6353a /home ext4 defaults,x-systemd.device-timeout=0,nodev,nosuid 1 2
+```
+
+O `1 2` no final permanece intacto, é exatamente o comportamento esperado. Pode rodar o `sed` sem preocupação com isso.
+
+---
+
+## Amanda Souza Bezerra
+
+### Prompt 1 — Base inicial do verificador
+
+> Quero que atue como um sênior e faça o COMEÇO para ser a base de um shell script bem feito com a função de verificador de baseline hardening para um servidor CentOS Stream com tais especificações:
+>
+> **`net-hardening.sh`** — Hardening de rede e firewalld. Inventário de portas com `ss -tulpn` contra lista autorizada, parâmetros sysctl de rede persistidos, zona do firewalld e rich rule com limite de taxa. Tem `--dry-run` e se recusa a remover a regra que sustenta a própria sessão.
+>
+> **`ssh-sentinel.sh`** — Detecção de brute force em SSH. Lê o journald, agrega falhas por IP, aplica limiar configurável e bloqueia no firewalld com TTL. Lista de exceções é obrigatória. Relatório com top 10 IPs e usuários. Comparar com o fail2ban.
+
+### Resposta gerada pela IA
+
+```bash
+#!/usr/bin/env bash
+# cis-baseline-check.sh — checagem rápida de hardening estilo CIS
+
+[[ "$EUID" -eq 0 ]] || { echo "roda como root"; exit 1; }
+
+echo "checando $(hostname)"
+echo
+
+# SELinux
+if [[ "$(getenforce)" == "Enforcing" ]]; then
+    echo "[OK]   SELinux enforcing"
+else
+    echo "[FAIL] SELinux não está enforcing -> roda: setenforce 1"
+fi
+
+# permissão do /etc/shadow
+perms="$(stat -c '%a' /etc/shadow)"
+if [[ "$perms" -le 640 ]]; then
+    echo "[OK]   /etc/shadow com permissão $perms"
+else
+    echo "[FAIL] /etc/shadow com permissão $perms -> roda: chmod 640 /etc/shadow"
+fi
+
+# contas com UID 0 além de root
+extras="$(awk -F: '$3==0 && $1!="root" {print $1}' /etc/passwd)"
+if [[ -z "$extras" ]]; then
+    echo "[OK]   só root com UID 0"
+else
+    echo "[FAIL] tem conta com UID 0 além de root: $extras"
+fi
+
+# auditd
+if systemctl is-active --quiet auditd; then
+    echo "[OK]   auditd rodando"
+else
+    echo "[FAIL] auditd parado -> roda: systemctl enable --now auditd"
+fi
+
+# root via SSH
+root_login="$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print $2}')"
+if [[ "$root_login" == "no" ]]; then
+    echo "[OK]   root não loga direto via SSH"
+else
+    echo "[FAIL] PermitRootLogin = $root_login -> edita /etc/ssh/sshd_config"
+fi
+
+# próximos: firewalld, senha/pam_faillock, SUID/SGID fora do esperado, updates pendentes
+```
+
+---
+
+### Prompt 2 — Explicação linha a linha
+
+> Poderia explicar cada linha para maior entendimento?
+
+### Resposta gerada pela IA
+
+**Cabeçalho**
+
+```bash
+#!/usr/bin/env bash
+```
+Shebang — diz pro sistema executar o arquivo com o bash, buscando ele no `PATH` em vez de fixar `/bin/bash`. Mais portável entre distros.
+
+```bash
+# cis-baseline-check.sh — checagem rápida de hardening estilo CIS
+# Grupo 6 - CentOS Stream - FIAP
+```
+Comentários de identificação, não fazem nada, só documentam o arquivo.
+
+```bash
+set -uo pipefail
+```
+Duas opções de segurança do bash:
+- `-u`: se você usar uma variável que nunca foi definida, o script quebra na hora em vez de tratar como string vazia silenciosamente. Evita bug bobo tipo digitar `$HSOT` em vez de `$HOST`.
+- `pipefail`: numa pipeline (`cmd1 | cmd2`), se `cmd1` falhar, o exit code final reflete essa falha, mesmo que `cmd2` tenha "funcionado". Sem isso, um erro no meio da pipe passa despercebido.
+
+Não usei `-e` (que mataria o script no primeiro comando que retornasse erro) porque aqui é esperado que checks "falhem" — um `grep` sem match, um `stat` que não acha o arquivo — e isso é dado, não bug.
+
+```bash
+[[ "$EUID" -eq 0 ]] || { echo "roda como root, tem coisa aqui que precisa"; exit 1; }
+```
+`$EUID` é o UID efetivo de quem está rodando o script. Se não for `0` (root), imprime a mensagem e sai com código `1`. O `||` só executa o bloco `{ }` se a condição da esquerda for falsa — é um jeito curto de escrever um `if` de uma linha.
+
+**Contadores e funções auxiliares**
+
+```bash
+PASS=0
+FAIL=0
+WARN=0
+```
+Três contadores simples, inicializados em zero, pra somar quantos checks passaram, falharam ou deram alerta.
+
+```bash
+ok()   { echo -e "  [OK]   $1"; ((PASS++)); }
+bad()  { echo -e "  [FAIL] $1 -> $2"; ((FAIL++)); }
+meh()  { echo -e "  [WARN] $1 -> $2"; ((WARN++)); }
+```
+Três funções auxiliares que centralizam a impressão do resultado:
+- `ok` recebe um argumento (`$1`, a descrição do que passou) e imprime com tag `[OK]`.
+- `bad` recebe dois argumentos: `$1` é o problema, `$2` é a sugestão de correção — imprime os dois separados por `->`.
+- `meh` é igual ao `bad`, mas pra casos que não são erro grave, só atenção.
+- `((PASS++))` é aritmética do bash, incrementa a variável.
+
+Isso evita repetir `echo` formatado em cada check — qualquer check só chama `ok "texto"` ou `bad "texto" "sugestão"`.
+
+**check_tmp_mount**
+
+```bash
+check_tmp_mount() {
+    if findmnt --noheadings /tmp &>/dev/null; then
+```
+`findmnt /tmp` verifica se `/tmp` está listado como ponto de montagem próprio (não apenas uma pasta dentro de `/`). `--noheadings` tira o cabeçalho da saída. `&>/dev/null` joga tanto a saída normal quanto erro pro limbo — aqui só importa o código de retorno (0 = achou o mount, ≠0 = não achou), não o texto.
+
+```bash
+        local opts
+        opts="$(findmnt -no OPTIONS /tmp)"
+```
+`local` declara a variável só dentro da função (boa prática, evita vazar pro escopo global). `findmnt -no OPTIONS /tmp` retorna só a coluna de opções de montagem (tipo `rw,nosuid,nodev,noexec,relatime`) sem cabeçalho (`-n`) e só essa coluna (`-o OPTIONS`).
+
+```bash
+        if [[ "$opts" == *noexec* && "$opts" == *nosuid* ]]; then
+            ok "/tmp em partição própria com noexec/nosuid"
+        else
+            meh "/tmp é partição própria mas sem noexec/nosuid" "adiciona as flags no fstab e remonta"
+        fi
+```
+`*noexec*` é um padrão de glob — verifica se a string `noexec` aparece em qualquer parte de `$opts`. Se tiver as duas flags, tudo certo (`ok`). Se `/tmp` é mount próprio mas falta alguma flag, é só um alerta (`meh`), não uma falha grave.
+
+```bash
+    else
+        bad "/tmp não é partição separada" "cria um LV dedicado pra /tmp"
+    fi
+}
+```
+Se o primeiro `findmnt` (lá em cima) não achou `/tmp` como mount separado, isso é tratado como falha real (`bad`), já que sem partição própria não dá nem pra aplicar as flags de segurança.
+
+**check_selinux**
+
+```bash
+check_selinux() {
+    if ! command -v getenforce &>/dev/null; then
+        meh "SELinux" "getenforce não encontrado, tem SELinux instalado?"
+        return
+    fi
+```
+`command -v getenforce` verifica se esse comando existe no sistema (retorna o caminho dele, ou nada + erro se não existir). O `!` inverte: "se NÃO existir". Se não existir, avisa e `return` sai da função sem continuar (não faz sentido checar o modo de algo que não está instalado).
+
+```bash
+    local mode
+    mode="$(getenforce)"
+    [[ "$mode" == "Enforcing" ]] \
+        && ok "SELinux em Enforcing" \
+        || bad "SELinux em modo $mode" "setenforce 1 e ajustar /etc/selinux/config"
+}
+```
+`getenforce` imprime o modo atual (`Enforcing`, `Permissive` ou `Disabled`). O `&&`/`||` aqui funciona como um if/else compacto: se a condição é verdadeira, executa o que vem depois do `&&`; senão, executa o que vem depois do `||`. A barra `\` no final da linha só quebra visualmente o comando em várias linhas sem afetar a execução.
+
+**check_shadow_perms**
+
+```bash
+check_shadow_perms() {
+    local perms
+    perms="$(stat -c '%a' /etc/shadow)"
+```
+`stat -c '%a'` extrai só a permissão em formato octal (tipo `640`) do arquivo, sem o resto da informação que `stat` normalmente mostra.
+
+```bash
+    [[ "$perms" -le 640 ]] \
+        && ok "/etc/shadow com permissão $perms" \
+        || bad "/etc/shadow com permissão $perms (muito aberto)" "chmod 640 /etc/shadow"
+}
+```
+`-le` é "menor ou igual", comparação numérica (não pode usar `<=` normal dentro de `[[ ]]` pra números). Se a permissão for 640 ou mais restritiva (ex: 600), passa. Se for mais aberta (ex: 644), falha.
+
+**check_uid_zero**
+
+```bash
+check_uid_zero() {
+    local extras
+    extras="$(awk -F: '$3 == 0 && $1 != "root" {print $1}' /etc/passwd)"
+```
+`/etc/passwd` tem uma linha por usuário, campos separados por `:`. `-F:` diz ao awk pra usar `:` como separador. `$3` é o terceiro campo (UID), `$1` é o primeiro (nome do usuário). A expressão filtra: UID igual a 0 E nome diferente de "root" — ou seja, contas "fantasmas" com privilégio de root escondidas sob outro nome. `{print $1}` imprime o nome dessas contas, se existirem.
+
+```bash
+    [[ -z "$extras" ]] \
+        && ok "só root com UID 0" \
+        || bad "conta(s) com UID 0 além de root: $extras" "investigar e corrigir na hora"
+}
+```
+`-z` testa se a string está vazia. Vazia = nenhuma conta suspeita = ok. Se tiver algo, lista os nomes na mensagem de falha.
+
+**check_auditd**
+
+```bash
+check_auditd() {
+    if systemctl is-active --quiet auditd 2>/dev/null; then
+        ok "auditd rodando"
+    else
+        bad "auditd parado ou não instalado" "dnf install audit && systemctl enable --now auditd"
+    fi
+}
+```
+`systemctl is-active --quiet auditd` só verifica se o serviço está ativo, sem imprimir nada (`--quiet`), retornando 0 (ativo) ou diferente de 0 (inativo/inexistente). `2>/dev/null` descarta mensagens de erro caso o serviço nem exista no systemd.
+
+**check_ssh_root_login**
+
+```bash
+check_ssh_root_login() {
+    local value
+    value="$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print $2}')"
+```
+`sshd -T` faz o próprio daemon SSH processar toda a configuração (incluindo includes e defaults) e imprimir o resultado final já resolvido — mais confiável que ler o `sshd_config` na mão, porque pega o valor efetivo de verdade. O `awk` procura a linha que começa com `permitrootlogin` e pega o segundo campo (o valor).
+
+```bash
+    case "${value,,}" in
+        no)   ok "PermitRootLogin desabilitado" ;;
+        "")   meh "não deu pra ler PermitRootLogin" "conferir /etc/ssh/sshd_config manualmente" ;;
+        *)    bad "PermitRootLogin = $value" "trocar pra 'no' em /etc/ssh/sshd_config" ;;
+    esac
+}
+```
+`${value,,}` converte a string pra minúsculas (útil porque o valor pode vir como `No` ou `NO`). `case` compara contra três padrões: exatamente `no` (ok), string vazia (não conseguiu ler, alerta), ou qualquer outra coisa (`*`, catch-all — inclusive `yes` ou `without-password`, tratado como falha).
+
+**Execução final**
+
+```bash
+echo "checando $(hostname) — $(date '+%Y-%m-%d %H:%M')"
+echo
+```
+Cabeçalho simples. `$(hostname)` e `$(date ...)` são substituição de comando — o que eles imprimem vira parte da string.
+
+```bash
+check_tmp_mount
+check_selinux
+check_shadow_perms
+check_uid_zero
+check_auditd
+check_ssh_root_login
+```
+Chama cada função na ordem — é literalmente isso, sem mágica.
+
+```bash
+echo
+echo "resultado: $PASS ok, $WARN atenção, $FAIL falha"
+```
+Resumo final usando os contadores que cada `ok`/`bad`/`meh` foi incrementando.
+
+```bash
+# próximos: firewalld, senhas/pam_faillock, SUID/SGID fora do esperado,
+# updates pendentes, banner de login, permissões de passwd/group
+```
