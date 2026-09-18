@@ -1,0 +1,3 @@
+  PV         VG Fmt  Attr PSize   PFree 
+  /dev/sda      lvm2 ---   20,00g 20,00g
+  /dev/sdb3  cs lvm2 a--  <48,54g  8,00m

@@ -1,0 +1,50 @@
+Verificador de baseline CIS -- centos 10
+== Montagens ==
+  [OK]   Montagem /tmp possui opcao nodev
+  [OK]   Montagem /tmp possui opcao nosuid
+  [OK]   Montagem /tmp possui opcao noexec
+  [OK]   Montagem /var/tmp possui opcao nodev
+  [OK]   Montagem /var/tmp possui opcao nosuid
+  [OK]   Montagem /var/tmp possui opcao noexec
+  [OK]   Montagem /home possui opcao nodev
+  [OK]   Montagem /home possui opcao nosuid
+  [OK]   Montagem /var/log possui opcao nodev
+  [OK]   Montagem /var/log possui opcao nosuid
+  [OK]   Montagem /var/log possui opcao noexec
+  [OK]   Montagem /boot possui opcao nodev
+  [OK]   Montagem /boot possui opcao nosuid
+  [OK]   Montagem /var possui opcao nodev
+== SELinux ==
+  [OK]   SELinux esta instalado
+  [OK]   SELinux modo enforcing
+  [OK]   SELinux nao desabilitado no bootloader
+== Servicos ==
+  [OK]   Servico telnet-server nao instalado
+  [OK]   Servico vsftpd/ftp nao instalado
+  [OK]   Servico rsync nao instalado
+  [OK]   Servico nfs-server nao instalado
+  [WARN] Servicos escutando em portas de rede -> 4 socket(s) ativos, revisar manualmente
+== Permissoes de /etc/shadow e afins ==
+  [OK]   Permissoes de /etc/passwd
+  [OK]   Permissoes de /etc/group
+  [OK]   Permissoes de /etc/shadow
+  [OK]   Permissoes de /etc/gshadow
+  [OK]   Nenhum arquivo world-writable encontrado em /etc e /usr
+== SUID/SGID ==
+  [FAIL] Binarios SUID/SGID conferem com a baseline esperada -> 6 binario(s) fora da baseline, revisar manualmente
+== Contas e grupos ==
+  [OK]   Nenhum UID duplicado em /etc/passwd
+  [OK]   Nenhum GID duplicado em /etc/group
+  [OK]   Apenas root possui UID 0
+== auditd ==
+  [OK]   Pacote audit (auditd) instalado
+  [OK]   Servico auditd ativo e habilitado
+  [FAIL] Regra de auditoria para /etc/passwd -> regra nao encontrada nas regras carregadas do auditd
+  [FAIL] Regra de auditoria para /etc/shadow -> regra nao encontrada nas regras carregadas do auditd
+  [FAIL] Regra de auditoria para /etc/sudoers -> regra nao encontrada nas regras carregadas do auditd
+  [OK]   Tamanho maximo de log do auditd configurado
+== Atualizacoes pendentes ==
+  [WARN] Atualizacoes pendentes -> 1 pacote(s) desatualizado(s) via dnf
+
+Resumo: PASS=32 FAIL=4 WARN=2
+Relatorio: /var/log/cis-baseline-check-report.html

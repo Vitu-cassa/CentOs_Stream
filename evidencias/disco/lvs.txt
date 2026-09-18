@@ -1,0 +1,8 @@
+  LV      VG Attr       LSize  Pool Origin Data%  Meta%  Move Log Cpy%Sync Convert
+  home    cs -wi-ao---- <9,33g                                                    
+  root    cs -wi-ao---- 13,98g                                                    
+  swap    cs -wi-ao----  7,46g                                                    
+  tmp     cs -wi-ao---- <2,81g                                                    
+  var     cs -wi-ao----  7,46g                                                    
+  var_log cs -wi-ao----  4,67g                                                    
+  var_tmp cs -wi-ao---- <2,81g                                                    

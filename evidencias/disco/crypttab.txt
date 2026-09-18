@@ -1,0 +1,7 @@
+luks-7991d7c4-2f9c-46c8-8b41-898a19e8089c UUID=7991d7c4-2f9c-46c8-8b41-898a19e8089c none discard,x-initrd.attach
+luks-2d909265-77f8-44d6-bc9e-c699d13a5503 UUID=2d909265-77f8-44d6-bc9e-c699d13a5503 none discard
+luks-95ddf339-05e6-4d98-8064-3b9ab400337d UUID=95ddf339-05e6-4d98-8064-3b9ab400337d none discard
+luks-bce04fd3-c3ee-45b8-9ac2-b4eeb528a685 UUID=bce04fd3-c3ee-45b8-9ac2-b4eeb528a685 none discard
+luks-857a6c9f-a8f2-40cf-bdad-4c43042e28e8 UUID=857a6c9f-a8f2-40cf-bdad-4c43042e28e8 none discard
+luks-d052c967-cae3-4db0-ab8b-30230cc14506 UUID=d052c967-cae3-4db0-ab8b-30230cc14506 none discard
+luks-54361f66-d7ea-44d5-b2b6-4093d63239e7 UUID=54361f66-d7ea-44d5-b2b6-4093d63239e7 none discard

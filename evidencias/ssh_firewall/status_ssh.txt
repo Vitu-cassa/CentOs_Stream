@@ -1,0 +1,20 @@
+● sshd.service - OpenSSH server daemon
+     Loaded: loaded (/usr/lib/systemd/system/sshd.service; enabled; preset: enabled)
+     Active: active (running) since Thu 2026-09-17 18:45:10 -03; 3h 22min ago
+ Invocation: f4cbed16c69e403993c703d29acec911
+       Docs: man:sshd(8)
+             man:sshd_config(5)
+   Main PID: 3788 (sshd)
+      Tasks: 1 (limit: 24444)
+     Memory: 6.1M (peak: 7M)
+        CPU: 73ms
+     CGroup: /system.slice/sshd.service
+             └─3788 "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"
+
+set 17 18:45:10 localhost.localdomain systemd[1]: Starting sshd.service - OpenSSH server daemon...
+set 17 18:45:10 localhost.localdomain sshd[3788]: Server listening on 0.0.0.0 port 1919.
+set 17 18:45:10 localhost.localdomain sshd[3788]: Server listening on :: port 1919.
+set 17 18:45:10 localhost.localdomain systemd[1]: Started sshd.service - OpenSSH server daemon.
+set 17 21:03:30 localhost.localdomain sshd-session[4683]: Postponed publickey for bdoe from 192.168.56.1 port 63000 ssh2 [preauth]
+set 17 21:03:30 localhost.localdomain sshd-session[4683]: Accepted publickey for bdoe from 192.168.56.1 port 63000 ssh2: ED25519 SHA256:zHSjYfWbDhrFcvfIyaUdrZjilZH4jUGkabuvPg4JIbk
+set 17 21:03:31 localhost.localdomain sshd-session[4683]: pam_unix(sshd:session): session opened for user bdoe(uid=1000) by bdoe(uid=0)

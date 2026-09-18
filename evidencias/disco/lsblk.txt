@@ -1,0 +1,21 @@
+NAME                                            FSTYPE      FSVER    LABEL UUID                                   FSAVAIL FSUSE% MOUNTPOINTS
+sda                                             LVM2_member LVM2 001       mgzmvZ-hnHO-OaLX-6P20-pgZL-g0lO-uTzTNI                
+sdb                                                                                                                              
+├─sdb1                                          vfat        FAT32          3D64-409C                               942,2M     1% /boot/efi
+├─sdb2                                          xfs                        834c38a3-fd5d-44a3-9d35-dab43c9da6d0    627,9M    29% /boot
+└─sdb3                                          LVM2_member LVM2 001       Q8jujD-eKkU-9JB2-Tm4O-MrXo-2Otx-iYpoHS                
+  ├─cs-root                                     crypto_LUKS 2              7991d7c4-2f9c-46c8-8b41-898a19e8089c                  
+  │ └─luks-7991d7c4-2f9c-46c8-8b41-898a19e8089c xfs                        21eda7e4-f49d-4949-b5e6-0b54194e84b9     12,2G    12% /
+  ├─cs-swap                                     crypto_LUKS 2              54361f66-d7ea-44d5-b2b6-4093d63239e7                  
+  │ └─luks-54361f66-d7ea-44d5-b2b6-4093d63239e7 swap        1              7a995f1e-119c-4b47-b346-e9975f054f6c                  [SWAP]
+  ├─cs-tmp                                      crypto_LUKS 2              d052c967-cae3-4db0-ab8b-30230cc14506                  
+  │ └─luks-d052c967-cae3-4db0-ab8b-30230cc14506 xfs                        8795855c-e033-4a46-9c0d-c000ba59f721      2,6G     3% /tmp
+  ├─cs-home                                     crypto_LUKS 2              857a6c9f-a8f2-40cf-bdad-4c43042e28e8                  
+  │ └─luks-857a6c9f-a8f2-40cf-bdad-4c43042e28e8 ext4        1.0            b823d88d-a1a0-4901-bcb2-c6682ee6353a      8,6G     0% /home
+  ├─cs-var_tmp                                  crypto_LUKS 2              bce04fd3-c3ee-45b8-9ac2-b4eeb528a685                  
+  │ └─luks-bce04fd3-c3ee-45b8-9ac2-b4eeb528a685 xfs                        6ab0eb6f-6053-46c2-80ea-97b3b244eee7      2,6G     4% /var/tmp
+  ├─cs-var_log                                  crypto_LUKS 2              95ddf339-05e6-4d98-8064-3b9ab400337d                  
+  │ └─luks-95ddf339-05e6-4d98-8064-3b9ab400337d xfs                        b1a93f18-086b-4ff4-8c5a-95d4bc032638      4,5G     3% /var/log
+  └─cs-var                                      crypto_LUKS 2              2d909265-77f8-44d6-bc9e-c699d13a5503                  
+    └─luks-2d909265-77f8-44d6-bc9e-c699d13a5503 xfs                        42c3e88b-eacb-46af-98ed-d519e53378ca      7,1G     4% /var
+sr0                                                                                                                              

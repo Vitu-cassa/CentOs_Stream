@@ -1,0 +1,20 @@
+cis-baseline-check.sh v1.1.0
+Verificador de baseline de hardening inspirado no CIS Benchmark.
+
+Uso:
+  cis-baseline-check.sh [opcoes]
+
+Opcoes:
+  -o ARQUIVO   Caminho do relatorio HTML de saida
+               (padrao: /var/log/cis-baseline-check-report.html)
+  -q           Modo silencioso (so grava no log, nao imprime WARN/ERROR)
+  -h, --help   Mostra esta ajuda e sai
+
+Codigos de saida:
+  0  sucesso, nenhuma falha encontrada
+  1  achado(s): pelo menos uma verificacao falhou
+  2  erro de uso (parametro invalido / sem privilegio)
+  3  erro de dependencia (comando necessario ausente)
+
+Log:      /var/log/cis-baseline-check.log
+Relatorio: /var/log/cis-baseline-check-report.html (ou o definido em -o)
