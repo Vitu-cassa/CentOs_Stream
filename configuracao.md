@@ -156,3 +156,147 @@ Bash
 O quarto campo do fstab (fs_mntops) permite adicionar proteções separadas por vírgula. As opções sugeridas estão relacionadas na Tabela 3.3.1.
 
 As modificações no /etc/fstab estão documentadas na seção “4 - Script: Baseline CIS”, confirmando a eficácia através de um script antes e depois das alterações.
+
+
+4 SCRIPT: BASELINE CIS
+🟠 4.1 Preparação do Ambiente
+
+Antes de qualquer configuração de segurança, foi criado um diretório próprio dentro do sistema para guardar os scripts que seriam usados durante todo o processo. Esse diretório serve como um local organizado e centralizado para armazenar as ferramentas de auditoria e verificação que seriam desenvolvidas.
+
+bash
+[root@localhost ~]# mkdir -p /root/scripts
+
+Em seguida foi criado o script chamado cis_baseline_check.sh, o programa responsável por verificar automaticamente se o servidor está seguindo todas as boas práticas de segurança esperadas. Esse script foi escrito para checar diversos pontos do sistema, como permissões de arquivos, configurações de montagem, programas com privilégios especiais e regras de auditoria.
+
+Nota: o script não executa nenhuma modificação no sistema, apenas realiza leitura e verificação (auditoria).
+
+bash
+[root@localhost scripts]# vim /root/scripts/cis_baseline_check.sh
+🟠 4.2 Hardening de Montagens (/etc/fstab)
+
+Depois de ter o script pronto, o próximo passo foi abrir o arquivo /etc/fstab, responsável por dizer ao sistema como cada partição do disco deve ser montada.
+
+bash
+[root@localhost ~]# vim /etc/fstab
+
+Nesse arquivo foram adicionadas três opções de segurança em várias partições, chamadas nodev, nosuid e noexec, conforme a Tabela 3.3.1:
+
+Partição	Opções adicionadas
+/boot	nodev,nosuid
+/home	nodev,nosuid
+/tmp	nodev,nosuid,noexec
+/var	nodev
+/var/log	nodev,nosuid,noexec
+/var/tmp	nodev,nosuid,noexec
+
+Depois de editar o arquivo, foi necessário avisar o sistema que a configuração mudou:
+
+bash
+[root@localhost ~]# systemctl daemon-reload
+
+Em seguida, cada partição foi remontada individualmente, aplicando as novas regras de segurança sem precisar reiniciar a máquina:
+
+bash
+[root@localhost ~]# mount -o remount /boot
+[root@localhost ~]# mount -o remount /home
+[root@localhost ~]# mount -o remount /tmp
+[root@localhost ~]# mount -o remount /var
+[root@localhost ~]# mount -o remount /var/log
+[root@localhost ~]# mount -o remount /var/tmp
+[root@localhost ~]# mount -a
+
+Durante esse processo apareceu um pequeno erro na partição /boot (fsconfig system call failed), resolvido apenas repetindo o comando.
+
+Para confirmar que as opções realmente foram aplicadas, consultamos o estado real das montagens direto do kernel:
+
+bash
+[root@localhost ~]# findmnt -o TARGET,OPTIONS | grep -E '/tmp|/var|/home|/boot'
+🟠 4.3 Execução Inicial do Script
+
+O script criado anteriormente recebeu permissão de execução:
+
+bash
+[root@localhost scripts]# chmod +x /root/scripts/cis_baseline_check.sh
+
+Após a atribuição da permissão, o script foi executado, realizando o benchmark do framework CIS contra o servidor:
+
+bash
+[root@localhost scripts]# ./cis_baseline_check.sh
+
+Considerando a pontuação do script, foram realizadas as configurações necessárias para atender às sugestões do benchmark, preparando o ambiente para um segundo teste.
+
+🟠 4.4 Redução de Superfície SUID/SGID
+
+Foi executado um comando de busca que varreu todo o sistema de arquivos procurando por programas com o bit especial de permissão SUID ou SGID:
+
+bash
+[root@localhost scripts]# find / -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null
+
+Esses são programas que, quando executados, ganham temporariamente os privilégios do dono do arquivo, geralmente o usuário root. O comando listou todos os programas com esse tipo de permissão ativa naquele momento.
+
+Depois de ver a lista completa, foi feita a remoção desse privilégio especial em vários programas que não precisavam dele para funcionar corretamente no ambiente do servidor:
+
+bash
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/chfn
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/chsh
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/write
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/newgrp
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/gpasswd
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/pkexec
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/chage
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/crontab
+[root@localhost scripts]# chmod u-s,g-s /usr/sbin/pam_timestamp_check
+[root@localhost scripts]# chmod u-s,g-s /usr/sbin/grub2-set-bootflag
+[root@localhost scripts]# chmod u-s,g-s /usr/libexec/utempter/utempter
+[root@localhost scripts]# chmod u-s,g-s /usr/lib/polkit-1/polkit-agent-helper-1
+[root@localhost scripts]# chmod u-s,g-s /usr/sbin/unix_chkpwd
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/mount
+[root@localhost scripts]# chmod u-s,g-s /usr/bin/umount
+
+Apenas os programas essenciais para o funcionamento básico do sistema — passwd, su e sudo — mantiveram esse privilégio, já que sem ele deixariam de funcionar.
+
+Para confirmar o resultado da limpeza, o comando de busca foi executado novamente:
+
+bash
+[root@localhost scripts]# find / -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null
+🟠 4.5 Regras de Auditoria (auditd)
+
+Foi criado um arquivo de regras para o serviço auditd, responsável por registrar e monitorar eventos importantes que acontecem no sistema. Dentro desse arquivo foram escritas três regras, vigiando qualquer alteração feita nos arquivos passwd, shadow e sudoers:
+
+bash
+[root@localhost scripts]# cat << 'EOF' > /etc/audit/rules.d/identity.rules
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/sudoers -p wa -k identity
+EOF
+
+Escrever o arquivo de regras não é suficiente para que elas comecem a funcionar de verdade. Por isso foi executado o comando augenrules com a opção load, que lê todas as regras escritas e carrega elas diretamente na memória do sistema:
+
+bash
+[root@localhost scripts]# augenrules --load
+
+Para confirmar que as regras estavam realmente ativas em memória:
+
+bash
+[root@localhost scripts]# auditctl -l
+🟠 4.6 Execução Final e Validação
+
+O script de auditoria foi executado novamente para conferir o estado geral do sistema depois de todas as correções feitas:
+
+bash
+[root@localhost scripts]# ./cis_baseline_check.sh
+
+Na primeira vez que ele rodou, antes das regras do auditd serem criadas, o resultado mostrou falhas relacionadas exatamente à ausência dessas regras (PASS=34 FAIL=3 WARN=1). Depois de criar e carregar as regras corretamente, o script foi executado mais uma vez e dessa vez todas as verificações passaram sem nenhuma falha (PASS=37 FAIL=0 WARN=1), mostrando que o sistema estava devidamente configurado e protegido conforme o esperado pelo framework.
+
+🟠 4.7 Exportação do Relatório
+
+Devido ao hardening aplicado, que bloqueou o acesso remoto direto do superusuário (root) via SSH, o relatório HTML foi copiado para o diretório home de um usuário comum antes de ser transferido:
+
+bash
+[root@localhost scripts]# cp /var/log/cis-baseline-check-report.html /home/bdoe/
+[root@localhost scripts]# chown bdoe:bdoe /home/bdoe/cis-baseline-check-report.html
+
+A transferência para a máquina física foi feita via SCP, utilizando a porta SSH customizada:
+
+bash
+PS C:\Users\maick\Desktop> scp -P 1919 bdoe@192.168.56.101:~/cis-baseline-check-report.html ~/Download
