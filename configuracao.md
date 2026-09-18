@@ -158,7 +158,10 @@ O quarto campo do fstab (fs_mntops) permite adicionar proteções separadas por 
 As modificações no /etc/fstab estão documentadas na seção “4 - Script: Baseline CIS”, confirmando a eficácia através de um script antes e depois das alterações.
 
 
-4 SCRIPT: BASELINE CIS
+
+🔸 4 SCRIPT: BASELINE CIS
+
+
 🟠 4.1 Preparação do Ambiente
 
 Antes de qualquer configuração de segurança, foi criado um diretório próprio dentro do sistema para guardar os scripts que seriam usados durante todo o processo. Esse diretório serve como um local organizado e centralizado para armazenar as ferramentas de auditoria e verificação que seriam desenvolvidas.
@@ -299,4 +302,5 @@ bash
 A transferência para a máquina física foi feita via SCP, utilizando a porta SSH customizada:
 
 bash
-PS C:\Users\maick\Desktop> scp -P 1919 bdoe@192.168.56.101:~/cis-baseline-check-report.html ~/Download
+PS C:\Users\maick\Desktop> scp -P 1919 bdoe@192.168.56.101:~/cis-baseline-check-report.html ~/Downloads/
+
